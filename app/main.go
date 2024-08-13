@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -158,19 +159,64 @@ func (dnsQs *dnsQuestion) encode(b []byte) (res_b []byte, err error) {
 }
 
 type dnsResourceRecord struct {
-	nameLen uint8
 	name string
-	rrType uint16 		// type of RR
-	classCode uint16	// class code
+	rrType RRType 		// type of RR
+	classCode ClassType	// class code
 	ttl uint32			// time to live
 	rdLen uint16		// RDATA length field
 	rdata []byte		// RDATA
 }
 
+func (dnsRR *dnsResourceRecord) String() string {
+	return fmt.Sprintf("name=%v,rrType=%v,classCode=%v,ttl=%v,rdLen=%v,rdata=%v", dnsRR.name, dnsRR.rrType, dnsRR.classCode, dnsRR.ttl, dnsRR.rdLen, dnsRR.rdata)
+}
+
+func (dnsRR *dnsResourceRecord) decode(b []byte) {}
+
+func (dnsRR *dnsResourceRecord) encode(b []byte) (res_b []byte, err error) {
+	domainNames := strings.Split(dnsRR.name, ".")
+	for _, domainName := range domainNames {
+		b = append(b, uint8(len(domainName)))
+		b = append(b, domainName...)
+	}
+	b = append(b, byte(0))
+	b = binary.BigEndian.AppendUint16(b, dnsRR.rrType)
+	b = binary.BigEndian.AppendUint16(b, dnsRR.classCode)
+	b = binary.BigEndian.AppendUint32(b, dnsRR.ttl)
+	b = binary.BigEndian.AppendUint16(b, dnsRR.rdLen)
+	b = append(b, dnsRR.rdata...)
+	return b, nil
+}
+
 type dnsMessage struct {
 	hdr dnsHeader
-	question []dnsQuestion
-	resourceRecord []dnsResourceRecord
+	questions []dnsQuestion
+	resourceRecords []dnsResourceRecord
+}
+
+func (dnsMsg *dnsMessage) decode(b []byte) {}
+
+func (dnsMsg *dnsMessage) encode(b []byte) (res_b []byte, err error) {
+	b, err = dnsMsg.hdr.encode(b)
+	if err != nil {
+		return b, err
+	}
+
+	for _, dnsQs := range dnsMsg.questions {
+		b, err = dnsQs.encode(b)
+		if err != nil {
+			return b, err
+		}
+	}
+
+	for _, dnsRR := range dnsMsg.resourceRecords {
+		b, err = dnsRR.encode(b)
+		if err != nil {
+			return b, err
+		}
+	}
+
+	return b, nil
 }
 
 func main() {
@@ -205,41 +251,46 @@ func main() {
 		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
 
 		// Create an empty response
-		response := []byte{}
-		respHeader := dnsHeader{}
-		respHeader.pktId = 1234
-		respHeader.isQueryIndicator=true
-		respHeader.opCode = 0
-		respHeader.isAuthoritativeAns = false
-		respHeader.truncated = false
-		respHeader.isRecursionDesired = false
-		respHeader.isRecursionAvailable = false
-		respHeader.reserved = 0
-		respHeader.respCode = 0
-		respHeader.qdCount = 1
-		respHeader.anCount = 0
-		respHeader.nsCount = 0
-		respHeader.arCount = 0
-		fmt.Println("Enconding packet header=", respHeader.String())
-		response, err = respHeader.encode(response)
-		fmt.Println("Resp bytes=", len(response))
-		if err!=nil {
-			fmt.Println("Error while encoding response header:", err)
-			os.Exit(0)
-		}
+		dnsMsg := dnsMessage{}
+		dnsMsg.hdr.pktId = 1234
+		dnsMsg.hdr.isQueryIndicator=true
+		dnsMsg.hdr.opCode = 0
+		dnsMsg.hdr.isAuthoritativeAns = false
+		dnsMsg.hdr.truncated = false
+		dnsMsg.hdr.isRecursionDesired = false
+		dnsMsg.hdr.isRecursionAvailable = false
+		dnsMsg.hdr.reserved = 0
+		dnsMsg.hdr.respCode = 0
+		dnsMsg.hdr.qdCount = 1
+		dnsMsg.hdr.anCount = 1
+		dnsMsg.hdr.nsCount = 0
+		dnsMsg.hdr.arCount = 0
+		fmt.Println("Pushing packet header=", dnsMsg.hdr.String())
 
 		respQuestion := dnsQuestion{}
 		respQuestion.name = "codecrafters.io"
 		respQuestion.rrType = A
 		respQuestion.classCode = IN
-		fmt.Println("Encoding dns question=", respQuestion)
-		response, err = respQuestion.encode(response)
-		fmt.Println("Resp bytes=", len(response))
+		fmt.Println("Pushing dns question=", respQuestion)
+		dnsMsg.questions = append(dnsMsg.questions, respQuestion)
+
+		respRR := dnsResourceRecord{}
+		respRR.name = "codecrafters.io"
+		respRR.rrType = A
+		respRR.classCode = IN
+		respRR.ttl = 60
+		respRR.rdLen = 4
+		respRR.rdata = []byte{8,8,8,8}
+		fmt.Println("Pushing dns resource record=", respRR)
+		dnsMsg.resourceRecords = append(dnsMsg.resourceRecords, respRR)
+
+		response := []byte{}
+		response, err = dnsMsg.encode(response)
 		if err != nil {
-			fmt.Println("Error while encoding dns question: ", err)
+			fmt.Println("Error encoding dns message: ", err)
 			os.Exit(0)
 		}
-
+		fmt.Println("Resource=%v", hex.EncodeToString(response))
 
 		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
