@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 )
 
 type OpCode = uint8
@@ -102,10 +103,58 @@ func (hdr* dnsHeader) encode(b []byte) (res_b []byte, err error) {
 	return b, nil
 }
 
+type RRType = uint16
+
+const (
+	A RRType = 1	// host address
+	NS RRType = 2	// authoritative name server
+	MD RRType = 3	// mail destination (obsolete - use MX)
+	MF RRType = 4	// mail forwarder (obsolete - use MX)
+	CNAME RRType = 5 	// canonical name for an alias
+	SOA RRType = 6		// start of a zone of authority
+	MB RRType = 7 		// mailbox domain name (EXPERIMENTAL)
+	MG RRType = 8		// mail group member (EXPERIMENTAL)
+	MR RRType = 9 		// mail rename domain name (EXPERIMENTAL)
+	NULL RRType = 10 	// null RR (EXPERIMENTAL)
+	WKS RRType = 11 	// well known service description
+	PTR RRType = 12 	// domain name pointer
+	HINFO RRType = 13 	// host information
+	MINFO RRType = 14 	// mailbox or mail list information
+	MX RRType = 15 		// mail exchange
+	TXT RRType = 16 	// text strings
+)
+
+type ClassType = uint16
+
+const (
+	IN ClassType = 1 		// Internet
+	CS ClassType = 2 		// CSNET (obsolete)
+	CH ClassType = 3 		// chaos class
+	HS ClassType = 4 		// Hesiod
+)
+
 type dnsQuestion struct {
 	name string
-	rrType uint16
-	classCode uint16
+	rrType RRType
+	classCode ClassType
+}
+
+func (dnsQs *dnsQuestion) String() string {
+	return fmt.Sprintf("name=%v,rrtype=%v,classCode=%v", dnsQs.name, dnsQs.rrType, dnsQs.classCode)
+}
+
+func (dnsQs *dnsQuestion) decode(b []byte) {}
+
+func (dnsQs *dnsQuestion) encode(b []byte) (res_b []byte, err error) {
+	domainNames := strings.Split(dnsQs.name, ".")
+	for _, domainName := range domainNames {
+		b = append(b, uint8(len(domainName)))
+		b = append(b, domainName...)
+	}
+	b = append(b, byte(0))
+	b = binary.BigEndian.AppendUint16(b, dnsQs.rrType)
+	b = binary.BigEndian.AppendUint16(b, dnsQs.classCode)
+	return b, nil
 }
 
 type dnsResourceRecord struct {
@@ -167,7 +216,7 @@ func main() {
 		respHeader.isRecursionAvailable = false
 		respHeader.reserved = 0
 		respHeader.respCode = 0
-		respHeader.qdCount = 0
+		respHeader.qdCount = 1
 		respHeader.anCount = 0
 		respHeader.nsCount = 0
 		respHeader.arCount = 0
@@ -176,6 +225,18 @@ func main() {
 		fmt.Println("Resp bytes=", len(response))
 		if err!=nil {
 			fmt.Println("Error while encoding response header:", err)
+			os.Exit(0)
+		}
+
+		respQuestion := dnsQuestion{}
+		respQuestion.name = "codecrafters.io"
+		respQuestion.rrType = A
+		respQuestion.classCode = IN
+		fmt.Println("Encoding dns question=", respQuestion)
+		response, err = respQuestion.encode(response)
+		fmt.Println("Resp bytes=", len(response))
+		if err != nil {
+			fmt.Println("Error while encoding dns question: ", err)
 			os.Exit(0)
 		}
 
