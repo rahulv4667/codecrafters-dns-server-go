@@ -48,7 +48,7 @@ func (hdr *dnsHeader) String() string {
 	return fmt.Sprintf("pkt_id:%v, isQuery:%v, opCode:%v, AuthoritativeAnswer:%v, truncated:%v, RecursionDesired:%v, RecursionAvailable:%v, ResponseCode:%v, Question Count:%v, Answer Count:%v, Authoritative Count:%v, Additional Record Count: %v", hdr.pktId, hdr.isQueryIndicator, hdr.opCode, hdr.isAuthoritativeAns, hdr.truncated, hdr.isRecursionDesired, hdr.isRecursionAvailable, hdr.respCode, hdr.qdCount, hdr.anCount, hdr.nsCount, hdr.arCount)
 }
 
-func (hdr* dnsHeader) decode(b []byte) {
+func (hdr* dnsHeader) decode(b []byte) (offset int, err error) {
 	hdr.pktId = binary.BigEndian.Uint16(b[0:2])
 
 	flags := binary.BigEndian.Uint16(b[2:4])
@@ -65,6 +65,7 @@ func (hdr* dnsHeader) decode(b []byte) {
 	hdr.anCount = binary.BigEndian.Uint16(b[6:8])
 	hdr.nsCount = binary.BigEndian.Uint16(b[8:10])
 	hdr.arCount = binary.BigEndian.Uint16(b[10:12])
+	return 12, nil
 }
 
 func (hdr* dnsHeader) encode(b []byte) (res_b []byte, err error) {
@@ -142,7 +143,26 @@ func (dnsQs *dnsQuestion) String() string {
 	return fmt.Sprintf("name=%v,rrtype=%v,classCode=%v", dnsQs.name, dnsQs.rrType, dnsQs.classCode)
 }
 
-func (dnsQs *dnsQuestion) decode(b []byte) {}
+func (dnsQs *dnsQuestion) decode(b []byte) (offset int, err error) {
+	var off int = 0
+	for b[off] != 0 {
+		var name_len int = int(b[off])
+		fmt.Printf("Question off:%v name_len:%v \n", off, name_len)
+		dnsQs.name += string(b[off+1:off+name_len+1])
+		dnsQs.name += "."
+		off = off + name_len + 1
+	}
+	// remove last dot
+	// name_len := len(dnsQs.name) - 1
+	dnsQs.name = dnsQs.name[:len(dnsQs.name) - 1]
+	fmt.Printf("Question name=%v\n", dnsQs.name)
+	off += 1
+	dnsQs.rrType = binary.BigEndian.Uint16(b[off:off+2])
+	off += 2
+	dnsQs.classCode = binary.BigEndian.Uint16(b[off:off+2])
+	off += 2
+	return offset, nil
+}
 
 func (dnsQs *dnsQuestion) encode(b []byte) (res_b []byte, err error) {
 	domainNames := strings.Split(dnsQs.name, ".")
@@ -248,7 +268,12 @@ func main() {
 		dnsMsg := dnsMessage{}
 		receivedData := string(buf[:size])
 		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
-		dnsMsg.hdr.decode([]byte(receivedData))
+		var offset int
+		offset, err = dnsMsg.hdr.decode([]byte(receivedData))
+		if err != nil {
+			fmt.Println("error while decoding header=", err)
+			return
+		}
 		fmt.Println("Header after decoding: ", dnsMsg.hdr.String())
 		// Create an empty response
 		// dnsMsg.hdr.pktId = 1234
@@ -271,14 +296,20 @@ func main() {
 		fmt.Println("Pushing packet header=", dnsMsg.hdr.String())
 
 		respQuestion := dnsQuestion{}
-		respQuestion.name = "codecrafters.io"
-		respQuestion.rrType = A
-		respQuestion.classCode = IN
+		offset, err = respQuestion.decode([]byte(receivedData)[offset:])
+		if err != nil {
+			fmt.Println("Error decoding question=", err)
+			return
+		}
+		// respQuestion.name = "codecrafters.io"
+		// respQuestion.rrType = A
+		// respQuestion.classCode = IN
 		fmt.Println("Pushing dns question=", respQuestion)
 		dnsMsg.questions = append(dnsMsg.questions, respQuestion)
 
 		respRR := dnsResourceRecord{}
-		respRR.name = "codecrafters.io"
+		// respRR.name = "codecrafters.io"
+		respRR.name = respQuestion.name
 		respRR.rrType = A
 		respRR.classCode = IN
 		respRR.ttl = 60
