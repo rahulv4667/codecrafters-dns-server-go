@@ -49,13 +49,11 @@ func (hdr *dnsHeader) String() string {
 }
 
 func (hdr* dnsHeader) decode(b []byte) {
-	binary.BigEndian.PutUint16(b[0:2], hdr.pktId)
+	hdr.pktId = binary.BigEndian.Uint16(b[0:2])
 
-	var flags uint16
-	binary.BigEndian.PutUint16(b[2:4], flags)
-	// parse flags
+	flags := binary.BigEndian.Uint16(b[2:4])
 	hdr.isQueryIndicator = (flags & 0x8000) > 0
-	hdr.opCode = uint8((flags & 0x7800) - 0x7FF)
+	hdr.opCode = uint8((flags & 0x7800) >> 11)
 	hdr.isAuthoritativeAns = (flags & 0x0400) > 0
 	hdr.truncated = (flags & 0x0200) > 0
 	hdr.isRecursionDesired = (flags & 0x0100) > 0
@@ -63,10 +61,10 @@ func (hdr* dnsHeader) decode(b []byte) {
 	hdr.reserved = uint8(flags & 0x0070)
 	hdr.respCode = uint8(flags & 0x000F)
 
-	binary.BigEndian.PutUint16(b[4:6], hdr.qdCount)
-	binary.BigEndian.PutUint16(b[6:8], hdr.anCount)
-	binary.BigEndian.PutUint16(b[8:10], hdr.nsCount)
-	binary.BigEndian.PutUint16(b[10:12], hdr.arCount)
+	hdr.qdCount = binary.BigEndian.Uint16(b[4:6])
+	hdr.anCount = binary.BigEndian.Uint16(b[6:8])
+	hdr.nsCount = binary.BigEndian.Uint16(b[8:10])
+	hdr.arCount = binary.BigEndian.Uint16(b[10:12])
 }
 
 func (hdr* dnsHeader) encode(b []byte) (res_b []byte, err error) {
@@ -76,7 +74,7 @@ func (hdr* dnsHeader) encode(b []byte) (res_b []byte, err error) {
 		flags |= 0x8000
 	}
 	if hdr.opCode > 0 {
-		flags |= (uint16(hdr.opCode) + 0x7ff)
+		flags |= (uint16(hdr.opCode) << 11)
 	}
 	if hdr.isAuthoritativeAns {
 		flags |= 0x0400
@@ -247,20 +245,25 @@ func main() {
 			break
 		}
 
+		dnsMsg := dnsMessage{}
 		receivedData := string(buf[:size])
 		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
-
+		dnsMsg.hdr.decode([]byte(receivedData))
+		fmt.Println("Header after decoding: ", dnsMsg.hdr.String())
 		// Create an empty response
-		dnsMsg := dnsMessage{}
-		dnsMsg.hdr.pktId = 1234
+		// dnsMsg.hdr.pktId = 1234
 		dnsMsg.hdr.isQueryIndicator=true
-		dnsMsg.hdr.opCode = 0
+		// dnsMsg.hdr.opCode = 0
 		dnsMsg.hdr.isAuthoritativeAns = false
 		dnsMsg.hdr.truncated = false
-		dnsMsg.hdr.isRecursionDesired = false
+		// dnsMsg.hdr.isRecursionDesired = false
 		dnsMsg.hdr.isRecursionAvailable = false
 		dnsMsg.hdr.reserved = 0
-		dnsMsg.hdr.respCode = 0
+		if dnsMsg.hdr.opCode == 0 {
+			dnsMsg.hdr.respCode = 0
+		} else {
+			dnsMsg.hdr.respCode = 4
+		}
 		dnsMsg.hdr.qdCount = 1
 		dnsMsg.hdr.anCount = 1
 		dnsMsg.hdr.nsCount = 0
@@ -290,7 +293,7 @@ func main() {
 			fmt.Println("Error encoding dns message: ", err)
 			os.Exit(0)
 		}
-		fmt.Println("Resource=%v", hex.EncodeToString(response))
+		fmt.Printf("Resource=%v\n", hex.EncodeToString(response))
 
 		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
