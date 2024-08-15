@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -218,9 +219,56 @@ func (dnsRR *dnsResourceRecord) String() string {
 	return fmt.Sprintf("name=%v,rrType=%v,classCode=%v,ttl=%v,rdLen=%v,rdata=%v", dnsRR.name, dnsRR.rrType, dnsRR.classCode, dnsRR.ttl, dnsRR.rdLen, dnsRR.rdata)
 }
 
-func (dnsRR *dnsResourceRecord) decode(b []byte, read_offset int) (offset int, err error) {
-	return 0, nil
+func (dnsRR *dnsResourceRecord) decode_name(b []byte, read_offset int) (offset int, err error) {
+	for b[read_offset] != 0 {
+		if b[read_offset] & 0xC0 > 0 { // is a pointer
+			pointingOffset := binary.BigEndian.Uint16(b[read_offset:read_offset+2])
+			pointingOffset &= 0x3FFF
+			var finalOffset int  =0
+			finalOffset, err = dnsRR.decode_name(b, int(pointingOffset))
+			if b[finalOffset-1] != 0 {
+				return finalOffset, fmt.Errorf("Error while decoding name from pointer")
+			} else if err != nil {
+				return finalOffset, err
+			}
+			read_offset += 2
+			return read_offset, err
+		} else {
+			var name_len int = int(b[read_offset])
+			fmt.Printf("RR off:%v name_len:%v \n", read_offset, name_len)
+			dnsRR.name += string(b[read_offset+1 : read_offset+name_len+1])
+			dnsRR.name += "."
+			read_offset = read_offset + name_len + 1
+		}
+	}
+	// remove last dot
+	// name_len := len(dnsQs.name) - 1
+	dnsRR.name = dnsRR.name[:len(dnsRR.name)-1]
+	fmt.Printf("RR name=%v\n", dnsRR.name)
+	read_offset += 1
+	return read_offset, nil
 }
+
+func (dnsRR *dnsResourceRecord) decode(b []byte, read_offset int) (offset int, err error) {
+	read_offset, err = dnsRR.decode_name(b, read_offset)
+	if err != nil {
+		fmt.Println("err while decoding name. err=", err)
+		return read_offset, err
+	}
+	dnsRR.rrType = binary.BigEndian.Uint16(b[read_offset : read_offset+2])
+	read_offset += 2
+	dnsRR.classCode = binary.BigEndian.Uint16(b[read_offset : read_offset+2])
+	read_offset += 2
+	dnsRR.ttl = binary.BigEndian.Uint32(b[read_offset: read_offset+4])
+	read_offset += 4
+	dnsRR.rdLen = binary.BigEndian.Uint16(b[read_offset: read_offset+2])
+	read_offset += 2
+	dnsRR.rdata = []byte{}
+	dnsRR.rdata = append(dnsRR.rdata, b[read_offset:read_offset+int(dnsRR.rdLen)]...)
+	read_offset+=int(dnsRR.rdLen)
+	return read_offset, nil
+}
+
 
 func (dnsRR *dnsResourceRecord) encode(b []byte) (res_b []byte, err error) {
 	domainNames := strings.Split(dnsRR.name, ".")
@@ -253,6 +301,23 @@ func (dnsMsg *dnsMessage) Clone() dnsMessage {
 		dnsMsgClone.resourceRecords = append(dnsMsgClone.resourceRecords, rr.Clone())
 	}
 	return dnsMsgClone
+}
+
+func (dnsMsg *dnsMessage) String() string {
+	var res string
+	res += "{\n"
+	res += dnsMsg.hdr.String()
+	res += "\nQuestions["
+	for _, qs := range dnsMsg.questions {
+		res += ("\t"+qs.String()+"\n")
+	}
+	res += "\n]\nResourceRecords[\n"
+	for _, rr := range dnsMsg.resourceRecords {
+		res += ("\t"+rr.String()+"\n")
+	}
+	res += "\n]"
+	res += "\n}"
+	return res
 }
 
 func (dnsMsg *dnsMessage) decode(b []byte, read_offset int) (offset int, err error) {
@@ -310,41 +375,102 @@ func (dnsMsg *dnsMessage) encode(b []byte) (res_b []byte, err error) {
 	return b, nil
 }
 
-func respond(dnsMsgReq* dnsMessage) (dnsMsgResp dnsMessage, err error) {
+func forwardQuery(dnsMsgReq* dnsMessage, resolver *string) (dnsMsgResp dnsMessage, err error) {
 	dnsMsgResp = dnsMsgReq.Clone()
-	// fill header appropriately
+
+	// encode req
+	b, err := dnsMsgReq.encode([]byte{})
+	if err != nil {
+		fmt.Println("Error while forwarding request:", err)
+		return dnsMsgResp, err
+	}
+	reqSize := len(b)
+
+	udpConn, err := net.Dial("udp", *resolver)
+	if err != nil {
+		fmt.Println("Error while connecting to resolver: ", err)
+		return dnsMsgResp, err
+	}
+
+	// write request
+	num_written := 0
+	for num_written < reqSize {
+		n, err := udpConn.Write(b[num_written:])
+		if err != nil {
+			fmt.Println("Error while writing request to resolver: ", err)
+			return dnsMsgResp, err
+		}
+		num_written += n
+	}
+	fmt.Printf("num_written:%v, reqSize: %v\n", num_written, reqSize)
+
+	// read response
+	response := make([]byte, 1024)
+	n, err := udpConn.Read(response)
+	if err != nil {
+		fmt.Println("Error while reading response from resolver: ", err)
+		return dnsMsgResp, err
+	}
+	offset, err := dnsMsgResp.decode(response, 0)
+	if err != nil {
+		fmt.Println("Error decoding message: err=", err)
+		return dnsMsgResp, err
+	}
+	if offset != n {
+		var errStr string
+		if err != nil {
+			errStr = err.Error()
+		}
+		err = fmt.Errorf("error while decoding response. err=%v read_offset=%v, msg_size=%v", errStr, offset, n)
+		return dnsMsgResp, err
+	}
+	fmt.Println("read_offset=", offset, ", n=", n)
+	return dnsMsgResp, nil
+}
+
+func respond(dnsMsgReq* dnsMessage, resolver *string) (dnsMsgResp dnsMessage, err error) {
+	dnsMsgResp = dnsMsgReq.Clone()
+	fmt.Println("Received Request:", dnsMsgReq.String())
+
+	for qCnt:=0; qCnt<int(dnsMsgReq.hdr.qdCount); qCnt++ {
+		// fill new req
+		dnsMsgForwardingReq := dnsMessage{}
+		dnsMsgForwardingReq.hdr = dnsMsgReq.hdr
+		dnsMsgForwardingReq.hdr.pktId = dnsMsgReq.hdr.pktId + uint16(qCnt) + 1
+		dnsMsgForwardingReq.hdr.qdCount = 1
+		dnsMsgForwardingReq.questions = append(dnsMsgForwardingReq.questions, dnsMsgReq.questions[qCnt])
+
+		dnsResolverResp, err := forwardQuery(&dnsMsgForwardingReq, resolver)
+		if err != nil {
+			fmt.Printf("Error resolving query #%v, err=%v\n", qCnt, err)
+			return dnsMsgResp, err
+		}
+
+		fmt.Printf("Forwarding Req: %v\n", dnsMsgForwardingReq.String())
+		fmt.Printf("Resolved resp: %v\n", dnsResolverResp.String())
+		// append new resp
+		if dnsResolverResp.hdr.opCode != OpCodeStandardQuery || dnsResolverResp.hdr.respCode != RespNoError {
+			fmt.Println("Error in resolution. Copying header")
+			dnsMsgResp.hdr = dnsResolverResp.hdr
+			dnsMsgResp.hdr.pktId = dnsMsgReq.hdr.pktId
+			break
+		}
+
+		dnsMsgResp.hdr.anCount++
+		dnsMsgResp.resourceRecords = append(dnsMsgResp.resourceRecords, dnsResolverResp.resourceRecords[0].Clone())
+	}
+
 	dnsMsgResp.hdr.isQueryIndicator = true
-	dnsMsgResp.hdr.isAuthoritativeAns = false
-	dnsMsgResp.hdr.truncated = false
-	dnsMsgResp.hdr.isRecursionAvailable = false
-	dnsMsgResp.hdr.reserved = 0
-	if dnsMsgReq.hdr.opCode == 0 {
-		dnsMsgResp.hdr.respCode = 0
-	} else {
-		dnsMsgResp.hdr.respCode = 4
-	}
-	dnsMsgResp.hdr.nsCount = 0
-	dnsMsgResp.hdr.arCount = 0
-	dnsMsgResp.hdr.anCount = dnsMsgReq.hdr.qdCount
-
-	// fill RR from questions
-	for _, qs  := range dnsMsgReq.questions {
-		respRR := dnsResourceRecord{}
-		respRR.rrType = A
-		respRR.classCode = IN
-		respRR.rdLen = 4
-		respRR.rdata = []byte{8,8,8,8}
-		respRR.name = qs.name
-		respRR.ttl = 60
-		dnsMsgResp.resourceRecords = append(dnsMsgResp.resourceRecords, respRR)
-	}
-
 
 	return dnsMsgResp, nil
 }
 func main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	fmt.Println("Logs from your program will appear here!")
+
+	var resolver = flag.String("resolver", "", "DNS address in format <ip>:<port>")
+	flag.Parse()
+	fmt.Println("resolver=", *resolver)
 
 	// Uncomment this block to pass the first stage
 	//
@@ -377,8 +503,8 @@ func main() {
 		// Create an empty response
 		var offset int
 		offset, err = dnsMsg.decode([]byte(receivedData), 0)
-		fmt.Printf("Error in decoding msg. offset=%v err=%v\n", offset, err)
-		dnsMsgResp, err := respond(&dnsMsg)
+		fmt.Printf("decoded msg. offset=%v err=%v\n", offset, err)
+		dnsMsgResp, err := respond(&dnsMsg, resolver)
 
 		response := []byte{}
 		response, err = dnsMsgResp.encode(response)
